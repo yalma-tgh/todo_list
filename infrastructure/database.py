@@ -17,26 +17,30 @@ class Database:
                     title TEXT NOT NULL,
                     description TEXT,
                     completed INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    user_id TEXT NOT NULL  
                 )
             """)
             conn.commit()
 
-    def create_task(self, task: Task) -> Task:
+    def create_task(self, task: Task, user_id: str) -> Task:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO tasks (title, description, completed, created_at) VALUES (?, ?, ?, ?)",
-                (task.title, task.description or None, 1 if task.completed else 0, task.created_at.isoformat())
+                "INSERT INTO tasks (title, description, completed, created_at, user_id) VALUES (?, ?, ?, ?, ?)",
+                (task.title, task.description or None, 1 if task.completed else 0, task.created_at.isoformat(), user_id)
             )
             conn.commit()
             task.id = cursor.lastrowid
             return task
 
-    def get_task_by_id(self, task_id: int) -> Optional[Task]:
+    def get_task_by_id(self, task_id: int, user_id: str) -> Optional[Task]:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, title, description, completed, created_at FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute(
+                "SELECT id, title, description, completed, created_at FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id)
+            )
             row = cursor.fetchone()
             if row:
                 return Task(
@@ -48,10 +52,13 @@ class Database:
                 )
             return None
 
-    def get_all_tasks(self) -> List[Task]:
+    def get_all_tasks(self, user_id: str) -> List[Task]:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, title, description, completed, created_at FROM tasks")
+            cursor.execute(
+                "SELECT id, title, description, completed, created_at FROM tasks WHERE user_id = ?",
+                (user_id,)
+            )
             rows = cursor.fetchall()
             return [
                 Task(
@@ -63,26 +70,27 @@ class Database:
                 ) for row in rows
             ]
 
-    def update_task(self, task_id: int, updated_task: Task) -> Optional[Task]:
+    def update_task(self, task_id: int, updated_task: Task, user_id: str) -> Optional[Task]:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE tasks SET title = ?, description = ?, completed = ? WHERE id = ?",
+                "UPDATE tasks SET title = ?, description = ?, completed = ? WHERE id = ? AND user_id = ?",
                 (
                     updated_task.title if updated_task.title is not None else None,
                     updated_task.description if updated_task.description is not None else None,
                     1 if updated_task.completed else 0,
-                    task_id
+                    task_id,
+                    user_id
                 )
             )
             conn.commit()
             if cursor.rowcount > 0:
-                return self.get_task_by_id(task_id)
+                return self.get_task_by_id(task_id, user_id)
             return None
 
-    def delete_task(self, task_id: int) -> bool:
+    def delete_task(self, task_id: int, user_id: str) -> bool:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id))
             conn.commit()
             return cursor.rowcount > 0

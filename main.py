@@ -25,10 +25,10 @@ class TodoBase(BaseModel):
     completed: bool
     created_at: str
 
-# CORS configuration
+# CORS configuration for localhost
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://35.225.173.123:5174"],
+    allow_origins=["http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,8 +90,8 @@ async def get_current_user(
 async def root(request: Request, current_user: dict | None = Depends(get_current_user)):
     """Redirects to frontend if logged in, otherwise to login."""
     if current_user:
-        return RedirectResponse(url="http://35.225.173.123:5174")
-    return RedirectResponse(url="http://35.225.173.123:5174/login")
+        return RedirectResponse(url="http://localhost:5174")
+    return RedirectResponse(url="http://localhost:5174/login")
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
@@ -107,26 +107,44 @@ async def handle_login(request: Request, email: str = Form(...), password: str =
     async with httpx.AsyncClient(timeout=30.0, cookies=None, follow_redirects=True) as client:
         # Start fast-login flow
         init_response = await client.get(f"{AUTHENTIK_API_BASE}flows/executor/fast-login/")
+        logger.debug(f"Init response: {init_response.json()}")
         if 'authentik_session' not in client.cookies:
             logger.error("Failed to initiate login flow: No session cookie received")
             return templates.TemplateResponse("login.html", {"request": request, "error": "Failed to initiate login flow."})
 
         csrf_token = client.cookies.get("authentik_csrf")
-        headers = {"Content-Type": "application/json", "Referer": "http://34.57.98.21/"}
+        headers = {"Content-Type": "application/json", "Referer": f"{AUTHENTIK_ISSUER}"}
         if csrf_token:
             headers["X-CSRFToken"] = csrf_token
+            logger.debug(f"CSRF Token: {csrf_token}")
 
         # Submit credentials
         ident_payload = {"component": "ak-stage-identification", "uid_field": email, "password": password}
-        await client.post(f"{AUTHENTIK_API_BASE}flows/executor/fast-login/", json=ident_payload, headers=headers)
+        logger.debug(f"Identification payload: {ident_payload}")
+        ident_response = await client.post(
+            f"{AUTHENTIK_API_BASE}flows/executor/fast-login/",
+            json=ident_payload,
+            headers=headers
+        )
+        logger.debug(f"Identification response: {ident_response.json()}")
+
+        if ident_response.json().get("component") == "ak-stage-identification":
+            logger.error(f"Identification failed: {ident_response.json().get('response_errors')}")
+            return {"error": f"Invalid credentials: {ident_response.json().get('response_errors')}"}
 
         # Confirm login
         login_payload = {"component": "ak-stage-user-login", "remember_me": True}
-        login_response = await client.post(f"{AUTHENTIK_API_BASE}flows/executor/fast-login/", json=login_payload, headers=headers)
+        logger.debug(f"Login payload: {login_payload}")
+        login_response = await client.post(
+            f"{AUTHENTIK_API_BASE}flows/executor/fast-login/",
+            json=login_payload,
+            headers=headers
+        )
+        logger.debug(f"Login response: {login_response.json()}")
 
         if login_response.json().get("component") != "xak-flow-redirect":
             logger.error(f"Login failed: {login_response.json()}")
-            return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid username or password."})
+            return {"error": "Invalid username or password."}
 
         # Start OIDC flow
         scopes = "openid profile email"
@@ -137,7 +155,7 @@ async def handle_login(request: Request, email: str = Form(...), password: str =
         # Check for consent screen
         if "/if/flow/" in str(auth_response.url):
             logger.error("OIDC flow interrupted by consent screen. Configure implicit consent in Authentik.")
-            return templates.TemplateResponse("login.html", {"request": request, "error": "Login failed: User consent required. See server logs."})
+            return {"error": "Login failed: User consent required. See server logs."}
 
         # Extract authorization code
         parsed_url = urlparse(str(auth_response.url))
@@ -147,7 +165,7 @@ async def handle_login(request: Request, email: str = Form(...), password: str =
 
         if not code:
             logger.error("Failed to get authorization code")
-            return templates.TemplateResponse("login.html", {"request": request, "error": "Failed to get authorization code."})
+            return {"error": "Failed to get authorization code."}
 
         # Exchange code for token
         token_response = await client.post(
@@ -163,13 +181,13 @@ async def handle_login(request: Request, email: str = Form(...), password: str =
 
         if token_response.status_code != 200:
             logger.error(f"Token exchange failed: {token_response.text}")
-            return templates.TemplateResponse("login.html", {"request": request, "error": f"Token exchange failed: {token_response.text}"})
+            return {"error": f"Token exchange failed: {token_response.text}"}
 
         access_token = token_response.json().get("access_token")
         logger.debug(f"Access Token: {access_token}")
 
         # Set cookie and redirect to frontend
-        response = RedirectResponse(url="http://35.225.173.123:5174", status_code=status.HTTP_303_SEE_OTHER)
+        response = RedirectResponse(url="http://localhost:5174", status_code=status.HTTP_303_SEE_OTHER)
         response.set_cookie(
             key="access_token",
             value=access_token,
@@ -177,9 +195,9 @@ async def handle_login(request: Request, email: str = Form(...), password: str =
             samesite="lax",
             secure=False,  # Set to True in production with HTTPS
             path="/",
-            domain="35.225.173.123"
+            domain="localhost"
         )
-        logger.debug("Redirecting to: http://35.225.173.123:5174")
+        logger.debug("Redirecting to: http://localhost:5174")
         return response
 
 @app.get("/auth/callback")
@@ -233,12 +251,13 @@ async def handle_registration(
 ):
     """Handles user registration via Authentik API."""
     if password != password_repeat:
-        return templates.TemplateResponse("register.html", {"request": request, "error": "Passwords do not match"})
+        return {"error": "Passwords do not match"}
 
+    authentik_base_url = AUTHENTIK_ISSUER.split("/application/")[0]
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             user_creation_response = await client.post(
-                f"{AUTHENTIK_API_BASE}core/users/",
+                f"{authentik_base_url}/api/v3/core/users/",
                 json={"username": username, "email": email, "name": name, "is_active": True, "type": "internal"},
                 headers={"Authorization": f"Bearer {API_TOKEN}"},
             )
@@ -246,23 +265,23 @@ async def handle_registration(
             user_id = user_creation_response.json().get('pk')
 
             password_response = await client.post(
-                f"{AUTHENTIK_API_BASE}core/users/{user_id}/set_password/",
+                f"{authentik_base_url}/api/v3/core/users/{user_id}/set_password/",
                 json={"password": password},
                 headers={"Authorization": f"Bearer {API_TOKEN}"},
             )
             password_response.raise_for_status()
         except httpx.HTTPStatusError as e:
             logger.error(f"Registration failed: {e.response.text}")
-            return templates.TemplateResponse("register.html", {"request": request, "error": f"Registration failed: {e.response.text}"})
+            return {"error": f"Registration failed: {e.response.text}"}
         except httpx.ReadTimeout:
             logger.error("Timeout connecting to Authentik server")
-            return templates.TemplateResponse("register.html", {"request": request, "error": "Timeout connecting to Authentik server."})
+            return {"error": "Timeout connecting to Authentik server."}
 
-    return RedirectResponse(url="http://35.225.173.123:5174/login", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(url="http://localhost:5174/login", status_code=status.HTTP_303_SEE_OTHER)
 
 @app.get("/logout")
 async def logout():
     """Logs out the user by clearing the cookie."""
-    response = RedirectResponse(url="http://35.225.173.123:5174/login")
-    response.delete_cookie("access_token", path="/", domain="35.225.173.123")
+    response = RedirectResponse(url="http://localhost:5174/login")
+    response.delete_cookie("access_token", path="/", domain="localhost")
     return response
