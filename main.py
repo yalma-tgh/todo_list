@@ -28,7 +28,7 @@ class TodoBase(BaseModel):
 # CORS configuration for localhost
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5174"],
+    allow_origins=["http://35.225.173.123:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,8 +90,8 @@ async def get_current_user(
 async def root(request: Request, current_user: dict | None = Depends(get_current_user)):
     """Redirects to frontend if logged in, otherwise to login."""
     if current_user:
-        return RedirectResponse(url="http://localhost:5174")
-    return RedirectResponse(url="http://localhost:5174/login")
+        return RedirectResponse(url="http://35.225.173.123:5174")
+    return RedirectResponse(url="http://35.225.173.123:5174/login")
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
