@@ -74,12 +74,16 @@ async def get_current_user(
     
     try:
         jwks = await get_jwks()
+        valid_issuers = [
+            AUTHENTIK_ISSUER,
+            AUTHENTIK_ISSUER.rstrip('/')
+        ]
         payload = jwt.decode(
             token,
             jwks,
             algorithms=["RS256"],
             audience=CLIENT_ID,
-            issuer=AUTHENTIK_ISSUER,
+            issuer=valid_issuers,
         )
         return payload
     except JWTError as e:
