@@ -83,7 +83,8 @@ async def get_current_user(
         )
         return payload
     except JWTError as e:
-        logger.error(f"JWT validation failed: {e}")
+        logger.error(f"JWT validation failed. Error: {e}")
+        logger.debug(f"Token being validated: {token}")
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 @app.get("/", response_class=HTMLResponse)
