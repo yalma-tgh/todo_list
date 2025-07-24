@@ -84,6 +84,7 @@ async def get_current_user(
             algorithms=["RS256"],
             audience=CLIENT_ID,
             issuer=valid_issuers,
+            options={"leeway": 10}
         )
         return payload
     except JWTError as e:
