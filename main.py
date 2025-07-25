@@ -24,6 +24,48 @@ app.include_router(task_router)
 # Add debug mode flag for easier troubleshooting
 DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "false").lower() == "true"
 
+
+# Create a middleware version of the authentication that's more permissive
+# for debugging purposes
+async def get_current_user_debug(
+    access_token: str | None = Cookie(default=None),
+    authorization: str | None = Header(default=None)
+):
+    """Debug version of user validation with relaxed checks."""
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ")[1]
+    elif access_token:
+        token = access_token
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        # Parse token without validation
+        token_parts = token.split('.')
+        if len(token_parts) < 2:
+            raise HTTPException(status_code=401, detail="Invalid token format")
+        
+        import base64
+        import json
+        
+        # Decode payload without verification
+        padded = token_parts[1] + '=' * (-len(token_parts[1]) % 4)  # Add padding if needed
+        payload_bytes = base64.urlsafe_b64decode(padded)
+        payload = json.loads(payload_bytes.decode('utf-8'))
+        
+        # Only check expiration
+        if payload.get("exp") and payload["exp"] < time.time():
+            raise HTTPException(status_code=401, detail="Token has expired")
+        
+        logger.warning("DEBUG MODE: Using unverified token payload")
+        return payload
+    except Exception as e:
+        logger.error(f"Debug token validation failed: {e}")
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+
 # Helper function to choose the right auth dependency based on mode
 def get_auth_dependency():
     if DEBUG_AUTH_MODE:
@@ -465,42 +507,3 @@ async def debug_token(request: Request, authorization: str | None = Header(defau
     except Exception as e:
         return {"error": f"Failed to decode token: {str(e)}"}
 
-# Create a middleware version of the authentication that's more permissive
-# for debugging purposes
-async def get_current_user_debug(
-    access_token: str | None = Cookie(default=None),
-    authorization: str | None = Header(default=None)
-):
-    """Debug version of user validation with relaxed checks."""
-    token = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split("Bearer ")[1]
-    elif access_token:
-        token = access_token
-    
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    try:
-        # Parse token without validation
-        token_parts = token.split('.')
-        if len(token_parts) < 2:
-            raise HTTPException(status_code=401, detail="Invalid token format")
-        
-        import base64
-        import json
-        
-        # Decode payload without verification
-        padded = token_parts[1] + '=' * (-len(token_parts[1]) % 4)  # Add padding if needed
-        payload_bytes = base64.urlsafe_b64decode(padded)
-        payload = json.loads(payload_bytes.decode('utf-8'))
-        
-        # Only check expiration
-        if payload.get("exp") and payload["exp"] < time.time():
-            raise HTTPException(status_code=401, detail="Token has expired")
-        
-        logger.warning("DEBUG MODE: Using unverified token payload")
-        return payload
-    except Exception as e:
-        logger.error(f"Debug token validation failed: {e}")
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
