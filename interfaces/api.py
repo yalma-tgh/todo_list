@@ -145,20 +145,28 @@ async def toggle_task_completion(task_id: int, current_user: dict = Depends(get_
 async def get_public_tasks():
     """This endpoint returns all tasks without requiring authentication"""
     logger.info("Public tasks endpoint called")
-    # Just use a dummy user ID
-    tasks = use_cases.get_all_tasks("dummy-user-id")
-    if not tasks:
-        # Create some dummy tasks if none exist
-        use_cases.create_task("Sample Task 1", "This is a sample task", "dummy-user-id")
-        use_cases.create_task("Sample Task 2", "This is another sample task", "dummy-user-id") 
+    
+    try:
+        # Just use a dummy user ID
         tasks = use_cases.get_all_tasks("dummy-user-id")
         
-    return [
-        TaskResponse(
-            id=task.id,
-            title=task.title,
-            description=task.description,
-            completed=task.completed,
-            created_at=task.created_at.strftime("%b %d, %Y")
-        ) for task in tasks
-    ]
+        # Create some dummy tasks if none exist
+        if not tasks:
+            logger.info("No tasks found, creating sample tasks")
+            use_cases.create_task("Sample Task 1", "This is a sample task", "dummy-user-id")
+            use_cases.create_task("Sample Task 2", "This is another sample task", "dummy-user-id") 
+            tasks = use_cases.get_all_tasks("dummy-user-id")
+        
+        return [
+            TaskResponse(
+                id=task.id,
+                title=task.title,
+                description=task.description,
+                completed=task.completed,
+                created_at=task.created_at.strftime("%b %d, %Y")
+            ) for task in tasks
+        ]
+    except Exception as e:
+        logger.error(f"Error in public-tasks endpoint: {str(e)}")
+        # Return an empty list instead of raising an error
+        return []

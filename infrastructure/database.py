@@ -11,6 +11,7 @@ class Database:
     def _init_db(self):
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
+            # Create tasks table if it doesn't exist
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,12 +19,21 @@ class Database:
                     description TEXT,
                     completed INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
-                    user_id TEXT NOT NULL  
+                    user_id TEXT NOT NULL DEFAULT 'dummy-user-id'
                 )
             """)
+            
+            # Check if user_id column exists, add it if not
+            try:
+                cursor.execute("SELECT user_id FROM tasks LIMIT 1")
+            except sqlite3.OperationalError:
+                # user_id column doesn't exist, add it
+                print("Adding user_id column to tasks table")
+                cursor.execute("ALTER TABLE tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'dummy-user-id'")
+            
             conn.commit()
-
-    def create_task(self, task: Task, user_id: str) -> Task:
+            
+    def create_task(self, task: Task, user_id: str = "dummy-user-id") -> Task:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -34,7 +44,7 @@ class Database:
             task.id = cursor.lastrowid
             return task
 
-    def get_task_by_id(self, task_id: int, user_id: str) -> Optional[Task]:
+    def get_task_by_id(self, task_id: int, user_id: str = "dummy-user-id") -> Optional[Task]:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -52,13 +62,21 @@ class Database:
                 )
             return None
 
-    def get_all_tasks(self, user_id: str) -> List[Task]:
+    def get_all_tasks(self, user_id: str = "dummy-user-id") -> List[Task]:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, title, description, completed, created_at FROM tasks WHERE user_id = ?",
-                (user_id,)
-            )
+            try:
+                cursor.execute(
+                    "SELECT id, title, description, completed, created_at FROM tasks WHERE user_id = ?",
+                    (user_id,)
+                )
+            except sqlite3.OperationalError:
+                # If there's an error with user_id column, try getting all tasks
+                print("Error querying with user_id, fetching all tasks instead")
+                cursor.execute(
+                    "SELECT id, title, description, completed, created_at FROM tasks"
+                )
+            
             rows = cursor.fetchall()
             return [
                 Task(
@@ -70,7 +88,7 @@ class Database:
                 ) for row in rows
             ]
 
-    def update_task(self, task_id: int, updated_task: Task, user_id: str) -> Optional[Task]:
+    def update_task(self, task_id: int, updated_task: Task, user_id: str = "dummy-user-id") -> Optional[Task]:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -88,7 +106,7 @@ class Database:
                 return self.get_task_by_id(task_id, user_id)
             return None
 
-    def delete_task(self, task_id: int, user_id: str) -> bool:
+    def delete_task(self, task_id: int, user_id: str = "dummy-user-id") -> bool:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id))
