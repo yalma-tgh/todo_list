@@ -21,8 +21,15 @@ app = FastAPI(title="To-Do List")
 app.include_router(task_router)
 
 
-# Add debug mode flag for easier troubleshooting
-DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "false").lower() == "true"
+# Explicitly set debug mode to True here for testing - change to False for production
+DEBUG_AUTH_MODE = True  # os.getenv("DEBUG_AUTH_MODE", "false").lower() == "true"
+
+# Add more debug info at startup
+if DEBUG_AUTH_MODE:
+    logger.warning("=== RUNNING IN DEBUG AUTH MODE - TOKEN VERIFICATION DISABLED ===")
+    logger.warning("=== THIS MODE SHOULD NOT BE USED IN PRODUCTION ===")
+else:
+    logger.info("Running in normal authentication mode with full JWT verification")
 
 
 # Create a middleware version of the authentication that's more permissive
@@ -506,4 +513,50 @@ async def debug_token(request: Request, authorization: str | None = Header(defau
         }
     except Exception as e:
         return {"error": f"Failed to decode token: {str(e)}"}
+
+@app.get("/debug/token-test")
+async def test_token(request: Request, authorization: str | None = Header(default=None)):
+    """Test endpoint that accepts any token without JWKS validation."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return {"error": "No valid authorization header found"}
+    
+    token = authorization.split("Bearer ")[1]
+    
+    try:
+        # Just decode without verification
+        token_parts = token.split('.')
+        if len(token_parts) < 2:
+            return {"error": "Invalid token format"}
+            
+        import base64
+        import json
+        
+        # Parse header
+        header_bytes = base64.urlsafe_b64decode(token_parts[0] + '==')
+        header = json.loads(header_bytes.decode('utf-8'))
+        
+        # Parse payload
+        padded = token_parts[1] + '=' * (-len(token_parts[1]) % 4)
+        payload_bytes = base64.urlsafe_b64decode(padded)
+        payload = json.loads(payload_bytes.decode('utf-8'))
+        
+        return {
+            "status": "Token parsed successfully (without validation)",
+            "header": header,
+            "payload_summary": {
+                "sub": payload.get("sub"),
+                "exp": payload.get("exp"),
+                "iat": payload.get("iat"),
+                "iss": payload.get("iss"),
+                "aud": payload.get("aud")
+            },
+            "user_info": {
+                "email": payload.get("email"),
+                "username": payload.get("preferred_username"),
+                "name": payload.get("name")
+            }
+        }
+    except Exception as e:
+        logger.error(f"Token test error: {e}")
+        return {"error": f"Failed to parse token: {str(e)}"}
 
