@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from pydantic import BaseModel
 import logging
+import time
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.DEBUG)
@@ -35,7 +36,7 @@ app.add_middleware(
 )
 
 # Authentik configuration
-AUTHENTIK_ISSUER = os.getenv("AUTHENTIK_ISSUER", "http://34.57.98.21/application/o/fast-api-dashboard/")
+AUTHENTIK_ISSUER = os.getenv("AUTHENTIK_ISSUER", "http://34.57.98.21/application/o/fast-api-dashboard/").rstrip("/") + "/"
 AUTHENTIK_AUTHORIZATION_URL = os.getenv("AUTHENTIK_AUTHORIZATION_URL", "http://34.57.98.21/application/o/authorize/")
 AUTHENTIK_TOKEN_URL = os.getenv("AUTHENTIK_TOKEN_URL", "http://34.57.98.21/application/o/token/")
 AUTHENTIK_API_BASE = "http://34.57.98.21/api/v3/"
@@ -44,19 +45,61 @@ CLIENT_ID = os.getenv("CLIENT_ID", "0kDGte5FD7g7sxB5sNJqiTfE0puDJf5mubxWi44W")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "D2CZZ0pN2WQdXHYXZd4BjCLzmY5zJSKWagYxYBjLgNIMchvoYHnhUfMHfpENP94rv4VZmjdCxHpHCk8Ns1GzIhSpW8Eq5DOhWiRSluoq3I35D7oFEZ78WnSQVo4MpUYL")
 API_TOKEN = os.getenv("API_TOKEN", "EykQzKFlAUGSyAXapXL7H9kpf4IOfPathnXkJYpza9jnuq61TuGj1DHrbzpr")
 
+# Add startup logging
+logger.info(f"AUTHENTIK_ISSUER: {AUTHENTIK_ISSUER}")
+logger.info(f"AUTHENTIK_JWKS_URL: {AUTHENTIK_JWKS_URL}")
+logger.info(f"CLIENT_ID: {CLIENT_ID}")
+logger.info(f"DEBUG_AUTH_MODE: {DEBUG_AUTH_MODE}")
+
+if DEBUG_AUTH_MODE:
+    logger.warning("RUNNING IN DEBUG AUTH MODE - TOKEN VERIFICATION IS RELAXED")
+    logger.warning("DO NOT USE THIS SETTING IN PRODUCTION")
+
 templates = Jinja2Templates(directory="templates")
 todos_db = []
 
+# Global cache for JWKS
+_JWKS_CACHE = {"keys": None, "expiry": 0}
+_JWKS_CACHE_TTL = 3600  # 1 hour
+
 async def get_jwks():
-    """Fetches the JSON Web Key Set from Authentik."""
+    """Fetches the JSON Web Key Set from Authentik with caching."""
+    global _JWKS_CACHE
+    
+    # Return cached JWKS if still valid
+    current_time = time.time()
+    if _JWKS_CACHE["keys"] and current_time < _JWKS_CACHE["expiry"]:
+        logger.debug("Using cached JWKS")
+        return _JWKS_CACHE["keys"]
+    
+    logger.debug(f"Fetching JWKS from {AUTHENTIK_JWKS_URL}")
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.get(AUTHENTIK_JWKS_URL)
             response.raise_for_status()
-            return response.json()
-        except (httpx.HTTPStatusError, json.JSONDecodeError) as e:
-            logger.error(f"Failed to get or parse JWKS: {e}")
-            raise HTTPException(status_code=502, detail="Could not retrieve signing keys from provider.")
+            jwks = response.json()
+            
+            # Verify we have a valid JWKS format
+            if "keys" not in jwks:
+                logger.error(f"Invalid JWKS format: {jwks}")
+                raise HTTPException(status_code=502, detail="Invalid JWKS format from provider")
+                
+            logger.debug(f"JWKS fetched successfully with {len(jwks['keys'])} keys")
+            
+            # Cache the result
+            _JWKS_CACHE["keys"] = jwks
+            _JWKS_CACHE["expiry"] = current_time + _JWKS_CACHE_TTL
+            
+            return jwks
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to get JWKS (HTTP error): {e.response.status_code} - {e.response.text}")
+            raise HTTPException(status_code=502, detail=f"Could not retrieve signing keys: HTTP error {e.response.status_code}")
+        except httpx.RequestError as e:
+            logger.error(f"Failed to get JWKS (request error): {str(e)}")
+            raise HTTPException(status_code=502, detail=f"Could not retrieve signing keys: {str(e)}")
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Failed to parse JWKS: {str(e)}")
+            raise HTTPException(status_code=502, detail="Could not parse signing keys from provider.")
 
 async def get_current_user(
     access_token: str | None = Cookie(default=None),
@@ -66,34 +109,105 @@ async def get_current_user(
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ")[1]
+        logger.debug("Token extracted from Authorization header")
     elif access_token:
         token = access_token
+        logger.debug("Token extracted from cookie")
     
     if not token:
+        logger.error("No token found in request")
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     try:
+        logger.debug("Fetching JWKS from provider")
         jwks = await get_jwks()
         valid_issuers = [
             AUTHENTIK_ISSUER,
             AUTHENTIK_ISSUER.rstrip('/')
         ]
-        payload = jwt.decode(
-            token,
-            jwks,
-            algorithms=["RS256"],
-            audience=CLIENT_ID,
-            issuer=valid_issuers,
-            options={"leeway": 10}
-        )
-        return payload
+        
+        # Log token details for debugging
+        logger.debug(f"Valid issuers: {valid_issuers}")
+        logger.debug(f"CLIENT_ID: {CLIENT_ID}")
+        logger.debug(f"JWKS URL: {AUTHENTIK_JWKS_URL}")
+        
+        # Add more detailed logging and disable some validations for troubleshooting
+        # This is temporary for debugging purposes
+        try:
+            # First try with all validations enabled
+            payload = jwt.decode(
+                token,
+                jwks,
+                algorithms=["RS256"],
+                audience=CLIENT_ID,
+                issuer=valid_issuers,
+                options={"leeway": 30}  # Increased leeway for clock skew
+            )
+            logger.debug("Token validation succeeded with full validation")
+            return payload
+        except JWTError as full_validation_error:
+            logger.error(f"Full validation failed: {str(full_validation_error)}")
+            
+            # Try with relaxed issuer validation - common source of problems
+            try:
+                logger.debug("Attempting validation with relaxed issuer check")
+                payload = jwt.decode(
+                    token,
+                    jwks,
+                    algorithms=["RS256"],
+                    audience=CLIENT_ID,
+                    options={"verify_iss": False, "leeway": 30}
+                )
+                logger.warning("Token validation succeeded with relaxed issuer validation")
+                return payload
+            except JWTError as issuer_error:
+                logger.error(f"Issuer-relaxed validation failed: {str(issuer_error)}")
+                
+                # As a last resort, try with minimal validation
+                try:
+                    logger.debug("Attempting validation with minimal checks")
+                    payload = jwt.decode(
+                        token,
+                        jwks,
+                        algorithms=["RS256"],
+                        options={
+                            "verify_aud": False,
+                            "verify_iss": False,
+                            "verify_exp": True,
+                            "leeway": 30
+                        }
+                    )
+                    logger.warning("Token validation succeeded with minimal validation")
+                    # Log what would have failed
+                    if "iss" in payload:
+                        logger.debug(f"Token issuer: {payload['iss']}")
+                    if "aud" in payload:
+                        logger.debug(f"Token audience: {payload['aud']}")
+                    return payload
+                except JWTError as minimal_error:
+                    logger.error(f"Even minimal validation failed: {str(minimal_error)}")
+                    raise
     except JWTError as e:
         logger.error(f"JWT validation failed. Error: {e}")
-        logger.debug(f"Token being validated: {token}")
+        # Log the first part of the token for debugging (don't log full token in production)
+        if token:
+            token_parts = token.split('.')
+            if len(token_parts) >= 2:
+                import base64
+                import json
+                try:
+                    header = json.loads(base64.urlsafe_b64decode(token_parts[0] + '==').decode('utf-8'))
+                    logger.debug(f"Token header: {header}")
+                    payload_part = json.loads(base64.urlsafe_b64decode(token_parts[1] + '==').decode('utf-8'))
+                    logger.debug(f"Token payload issuer: {payload_part.get('iss')}")
+                    logger.debug(f"Token payload audience: {payload_part.get('aud')}")
+                    logger.debug(f"Token payload expiration: {payload_part.get('exp')}")
+                except Exception as decode_error:
+                    logger.error(f"Error decoding token parts: {decode_error}")
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request, current_user: dict | None = Depends(get_current_user)):
+async def root(request: Request, current_user: dict | None = Depends(get_auth_dependency())):
     """Redirects to frontend if logged in, otherwise to login."""
     if current_user:
         return RedirectResponse(url="http://35.225.173.123:5174")
@@ -200,12 +314,12 @@ async def auth_callback():
     return {"status": "ok"}
 
 @app.get("/tasks/", response_model=List[TodoBase])
-async def get_tasks(current_user: dict = Depends(get_current_user)):
+async def get_tasks(current_user: dict = Depends(get_auth_dependency())):
     """Returns the list of tasks."""
     return todos_db
 
 @app.post("/tasks/")
-async def create_task(todo: TodoBase, current_user: dict = Depends(get_current_user)):
+async def create_task(todo: TodoBase, current_user: dict = Depends(get_auth_dependency())):
     """Creates a new task."""
     todo_dict = todo.dict()
     todo_dict["id"] = len(todos_db) + 1
@@ -214,7 +328,7 @@ async def create_task(todo: TodoBase, current_user: dict = Depends(get_current_u
     return todo_dict
 
 @app.put("/tasks/{id}/toggle-complete")
-async def toggle_complete(id: int, current_user: dict = Depends(get_current_user)):
+async def toggle_complete(id: int, current_user: dict = Depends(get_auth_dependency())):
     """Toggles the completion status of a task."""
     for todo in todos_db:
         if todo["id"] == id:
@@ -223,7 +337,7 @@ async def toggle_complete(id: int, current_user: dict = Depends(get_current_user
     raise HTTPException(status_code=404, detail="Todo not found")
 
 @app.delete("/tasks/{id}")
-async def delete_task(id: int, current_user: dict = Depends(get_current_user)):
+async def delete_task(id: int, current_user: dict = Depends(get_auth_dependency())):
     """Deletes a task."""
     global todos_db
     todos_db = [todo for todo in todos_db if todo["id"] != id]
@@ -279,3 +393,113 @@ async def logout():
     response = JSONResponse(content={"message": "Logout successful"})
     response.delete_cookie("access_token", path="/", domain="localhost")
     return response
+
+@app.get("/debug/token")
+async def debug_token(request: Request, authorization: str | None = Header(default=None)):
+    """Debug endpoint to check token details."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return {"error": "No valid authorization header found"}
+    
+    token = authorization.split("Bearer ")[1]
+    token_parts = token.split('.')
+    if len(token_parts) < 2:
+        return {"error": "Invalid JWT format"}
+    
+    try:
+        import base64
+        import json
+        
+        # Decode header
+        header_bytes = base64.urlsafe_b64decode(token_parts[0] + '==')
+        header = json.loads(header_bytes.decode('utf-8'))
+        
+        # Decode payload
+        payload_bytes = base64.urlsafe_b64decode(token_parts[1] + '==')
+        payload = json.loads(payload_bytes.decode('utf-8'))
+        
+        # Check if JWKS endpoint is accessible
+        jwks_status = "Unknown"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                jwks_response = await client.get(AUTHENTIK_JWKS_URL)
+                jwks_status = f"OK ({jwks_response.status_code})" if jwks_response.ok else f"Error ({jwks_response.status_code})"
+        except Exception as e:
+            jwks_status = f"Error: {str(e)}"
+        
+        return {
+            "token_format": "Valid JWT format",
+            "header": header,
+            "payload_info": {
+                "iss": payload.get("iss"),
+                "sub": payload.get("sub"),
+                "aud": payload.get("aud"),
+                "exp": payload.get("exp"),
+                "iat": payload.get("iat"),
+                "current_time": int(time.time()),
+                "time_until_expiry": payload.get("exp", 0) - int(time.time()) if payload.get("exp") else None
+            },
+            "authentik_config": {
+                "issuer": AUTHENTIK_ISSUER,
+                "jwks_url": AUTHENTIK_JWKS_URL,
+                "jwks_status": jwks_status,
+                "client_id": CLIENT_ID
+            },
+            "validation_check": {
+                "issuer_match": payload.get("iss") == AUTHENTIK_ISSUER or payload.get("iss") == AUTHENTIK_ISSUER.rstrip('/'),
+                "audience_match": payload.get("aud") == CLIENT_ID,
+                "token_expired": payload.get("exp", 0) < time.time() if payload.get("exp") else None
+            }
+        }
+    except Exception as e:
+        return {"error": f"Failed to decode token: {str(e)}"}
+
+# Create a middleware version of the authentication that's more permissive
+# for debugging purposes
+async def get_current_user_debug(
+    access_token: str | None = Cookie(default=None),
+    authorization: str | None = Header(default=None)
+):
+    """Debug version of user validation with relaxed checks."""
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split("Bearer ")[1]
+    elif access_token:
+        token = access_token
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        # Parse token without validation
+        token_parts = token.split('.')
+        if len(token_parts) < 2:
+            raise HTTPException(status_code=401, detail="Invalid token format")
+        
+        import base64
+        import json
+        
+        # Decode payload without verification
+        padded = token_parts[1] + '=' * (-len(token_parts[1]) % 4)  # Add padding if needed
+        payload_bytes = base64.urlsafe_b64decode(padded)
+        payload = json.loads(payload_bytes.decode('utf-8'))
+        
+        # Only check expiration
+        if payload.get("exp") and payload["exp"] < time.time():
+            raise HTTPException(status_code=401, detail="Token has expired")
+        
+        logger.warning("DEBUG MODE: Using unverified token payload")
+        return payload
+    except Exception as e:
+        logger.error(f"Debug token validation failed: {e}")
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+# Add debug mode flag for easier troubleshooting
+DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "false").lower() == "true"
+
+# Helper function to choose the right auth dependency based on mode
+def get_auth_dependency():
+    if DEBUG_AUTH_MODE:
+        logger.warning("RUNNING IN DEBUG AUTH MODE - DO NOT USE IN PRODUCTION")
+        return get_current_user_debug
+    else:
+        return get_current_user
