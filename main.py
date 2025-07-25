@@ -75,11 +75,8 @@ async def get_current_user_debug(
 
 # Helper function to choose the right auth dependency based on mode
 def get_auth_dependency():
-    if DEBUG_AUTH_MODE:
-        logger.warning("RUNNING IN DEBUG AUTH MODE - DO NOT USE IN PRODUCTION")
-        return get_current_user_debug
-    else:
-        return get_current_user
+    # Always use the main get_current_user which now has debug mode handling built in
+    return get_current_user
 
 class TodoBase(BaseModel):
     title: str
@@ -97,7 +94,7 @@ app.add_middleware(
 )
 
 # Authentik configuration
-AUTHENTIK_ISSUER = os.getenv("AUTHENTIK_ISSUER", "http://34.57.98.21/application/o/fast-api-dashboard/").rstrip("/") + "/"
+AUTHENTIK_ISSUER = os.getenv("AUTHENTIK_ISSUER", "http://34.57.98.21/application/o/fast-api-dashboard/")
 AUTHENTIK_AUTHORIZATION_URL = os.getenv("AUTHENTIK_AUTHORIZATION_URL", "http://34.57.98.21/application/o/authorize/")
 AUTHENTIK_TOKEN_URL = os.getenv("AUTHENTIK_TOKEN_URL", "http://34.57.98.21/application/o/token/")
 AUTHENTIK_API_BASE = "http://34.57.98.21/api/v3/"
@@ -124,49 +121,22 @@ _JWKS_CACHE = {"keys": None, "expiry": 0}
 _JWKS_CACHE_TTL = 3600  # 1 hour
 
 async def get_jwks():
-    """Fetches the JSON Web Key Set from Authentik with caching."""
-    global _JWKS_CACHE
-    
-    # Return cached JWKS if still valid
-    current_time = time.time()
-    if _JWKS_CACHE["keys"] and current_time < _JWKS_CACHE["expiry"]:
-        logger.debug("Using cached JWKS")
-        return _JWKS_CACHE["keys"]
-    
-    logger.debug(f"Fetching JWKS from {AUTHENTIK_JWKS_URL}")
+    """Fetches the JSON Web Key Set from Authentik."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.get(AUTHENTIK_JWKS_URL)
             response.raise_for_status()
-            jwks = response.json()
-            
-            # Verify we have a valid JWKS format
-            if "keys" not in jwks:
-                logger.error(f"Invalid JWKS format: {jwks}")
-                raise HTTPException(status_code=502, detail="Invalid JWKS format from provider")
-                
-            logger.debug(f"JWKS fetched successfully with {len(jwks['keys'])} keys")
-            
-            # Cache the result
-            _JWKS_CACHE["keys"] = jwks
-            _JWKS_CACHE["expiry"] = current_time + _JWKS_CACHE_TTL
-            
-            return jwks
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Failed to get JWKS (HTTP error): {e.response.status_code} - {e.response.text}")
-            raise HTTPException(status_code=502, detail=f"Could not retrieve signing keys: HTTP error {e.response.status_code}")
-        except httpx.RequestError as e:
-            logger.error(f"Failed to get JWKS (request error): {str(e)}")
-            raise HTTPException(status_code=502, detail=f"Could not retrieve signing keys: {str(e)}")
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"Failed to parse JWKS: {str(e)}")
-            raise HTTPException(status_code=502, detail="Could not parse signing keys from provider.")
+            return response.json()
+        except (httpx.HTTPStatusError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to get or parse JWKS: {e}")
+            raise HTTPException(status_code=502, detail="Could not retrieve signing keys from provider.")
 
 async def get_current_user(
     access_token: str | None = Cookie(default=None),
     authorization: str | None = Header(default=None)
 ):
     """Validates the access token from cookie or Authorization header."""
+    # Extract token from either Authorization header or cookie
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ")[1]
@@ -180,91 +150,37 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     try:
-        logger.debug("Fetching JWKS from provider")
+        # Simplify token validation to match the working example
         jwks = await get_jwks()
-        valid_issuers = [
-            AUTHENTIK_ISSUER,
-            AUTHENTIK_ISSUER.rstrip('/')
-        ]
         
-        # Log token details for debugging
-        logger.debug(f"Valid issuers: {valid_issuers}")
-        logger.debug(f"CLIENT_ID: {CLIENT_ID}")
-        logger.debug(f"JWKS URL: {AUTHENTIK_JWKS_URL}")
-        
-        # Add more detailed logging and disable some validations for troubleshooting
-        # This is temporary for debugging purposes
-        try:
-            # First try with all validations enabled
-            payload = jwt.decode(
-                token,
-                jwks,
-                algorithms=["RS256"],
-                audience=CLIENT_ID,
-                issuer=valid_issuers,
-                options={"leeway": 30}  # Increased leeway for clock skew
-            )
-            logger.debug("Token validation succeeded with full validation")
-            return payload
-        except JWTError as full_validation_error:
-            logger.error(f"Full validation failed: {str(full_validation_error)}")
-            
-            # Try with relaxed issuer validation - common source of problems
-            try:
-                logger.debug("Attempting validation with relaxed issuer check")
-                payload = jwt.decode(
-                    token,
-                    jwks,
-                    algorithms=["RS256"],
-                    audience=CLIENT_ID,
-                    options={"verify_iss": False, "leeway": 30}
-                )
-                logger.warning("Token validation succeeded with relaxed issuer validation")
-                return payload
-            except JWTError as issuer_error:
-                logger.error(f"Issuer-relaxed validation failed: {str(issuer_error)}")
-                
-                # As a last resort, try with minimal validation
-                try:
-                    logger.debug("Attempting validation with minimal checks")
-                    payload = jwt.decode(
-                        token,
-                        jwks,
-                        algorithms=["RS256"],
-                        options={
-                            "verify_aud": False,
-                            "verify_iss": False,
-                            "verify_exp": True,
-                            "leeway": 30
-                        }
-                    )
-                    logger.warning("Token validation succeeded with minimal validation")
-                    # Log what would have failed
-                    if "iss" in payload:
-                        logger.debug(f"Token issuer: {payload['iss']}")
-                    if "aud" in payload:
-                        logger.debug(f"Token audience: {payload['aud']}")
-                    return payload
-                except JWTError as minimal_error:
-                    logger.error(f"Even minimal validation failed: {str(minimal_error)}")
-                    raise
+        # Use the exact issuer URL format from the token
+        # This is a critical fix - the working code doesn't use a list of valid issuers
+        payload = jwt.decode(
+            token,
+            jwks,
+            algorithms=["RS256"],
+            audience=CLIENT_ID,
+            issuer=AUTHENTIK_ISSUER,
+        )
+        logger.debug("Token validation successful")
+        return payload
     except JWTError as e:
         logger.error(f"JWT validation failed. Error: {e}")
-        # Log the first part of the token for debugging (don't log full token in production)
-        if token:
-            token_parts = token.split('.')
-            if len(token_parts) >= 2:
-                import base64
-                import json
-                try:
-                    header = json.loads(base64.urlsafe_b64decode(token_parts[0] + '==').decode('utf-8'))
-                    logger.debug(f"Token header: {header}")
-                    payload_part = json.loads(base64.urlsafe_b64decode(token_parts[1] + '==').decode('utf-8'))
-                    logger.debug(f"Token payload issuer: {payload_part.get('iss')}")
-                    logger.debug(f"Token payload audience: {payload_part.get('aud')}")
-                    logger.debug(f"Token payload expiration: {payload_part.get('exp')}")
-                except Exception as decode_error:
-                    logger.error(f"Error decoding token parts: {decode_error}")
+        if DEBUG_AUTH_MODE:
+            # In debug mode, try to parse the token and return the payload anyway
+            try:
+                logger.warning("DEBUG MODE: Using unverified token")
+                token_parts = token.split('.')
+                if len(token_parts) >= 2:
+                    import base64
+                    import json
+                    padded = token_parts[1] + '=' * (-len(token_parts[1]) % 4)
+                    payload_bytes = base64.urlsafe_b64decode(padded)
+                    payload = json.loads(payload_bytes.decode('utf-8'))
+                    return payload
+            except Exception as parse_error:
+                logger.error(f"DEBUG MODE: Failed to parse token: {parse_error}")
+                
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 @app.get("/", response_class=HTMLResponse)
@@ -513,50 +429,4 @@ async def debug_token(request: Request, authorization: str | None = Header(defau
         }
     except Exception as e:
         return {"error": f"Failed to decode token: {str(e)}"}
-
-@app.get("/debug/token-test")
-async def test_token(request: Request, authorization: str | None = Header(default=None)):
-    """Test endpoint that accepts any token without JWKS validation."""
-    if not authorization or not authorization.startswith("Bearer "):
-        return {"error": "No valid authorization header found"}
-    
-    token = authorization.split("Bearer ")[1]
-    
-    try:
-        # Just decode without verification
-        token_parts = token.split('.')
-        if len(token_parts) < 2:
-            return {"error": "Invalid token format"}
-            
-        import base64
-        import json
-        
-        # Parse header
-        header_bytes = base64.urlsafe_b64decode(token_parts[0] + '==')
-        header = json.loads(header_bytes.decode('utf-8'))
-        
-        # Parse payload
-        padded = token_parts[1] + '=' * (-len(token_parts[1]) % 4)
-        payload_bytes = base64.urlsafe_b64decode(padded)
-        payload = json.loads(payload_bytes.decode('utf-8'))
-        
-        return {
-            "status": "Token parsed successfully (without validation)",
-            "header": header,
-            "payload_summary": {
-                "sub": payload.get("sub"),
-                "exp": payload.get("exp"),
-                "iat": payload.get("iat"),
-                "iss": payload.get("iss"),
-                "aud": payload.get("aud")
-            },
-            "user_info": {
-                "email": payload.get("email"),
-                "username": payload.get("preferred_username"),
-                "name": payload.get("name")
-            }
-        }
-    except Exception as e:
-        logger.error(f"Token test error: {e}")
-        return {"error": f"Failed to parse token: {str(e)}"}
 
