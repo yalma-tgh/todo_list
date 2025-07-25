@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="To-Do List")
 app.include_router(task_router)
 
+
+# Add debug mode flag for easier troubleshooting
+DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "false").lower() == "true"
+
+# Helper function to choose the right auth dependency based on mode
+def get_auth_dependency():
+    if DEBUG_AUTH_MODE:
+        logger.warning("RUNNING IN DEBUG AUTH MODE - DO NOT USE IN PRODUCTION")
+        return get_current_user_debug
+    else:
+        return get_current_user
+
 class TodoBase(BaseModel):
     title: str
     description: str
@@ -492,14 +504,3 @@ async def get_current_user_debug(
     except Exception as e:
         logger.error(f"Debug token validation failed: {e}")
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
-
-# Add debug mode flag for easier troubleshooting
-DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "false").lower() == "true"
-
-# Helper function to choose the right auth dependency based on mode
-def get_auth_dependency():
-    if DEBUG_AUTH_MODE:
-        logger.warning("RUNNING IN DEBUG AUTH MODE - DO NOT USE IN PRODUCTION")
-        return get_current_user_debug
-    else:
-        return get_current_user
